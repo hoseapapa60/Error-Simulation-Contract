@@ -34,33 +34,90 @@
 (define-data-var next-withdrawal-id uint u1)
 (define-data-var emergency-mode bool false)
 (define-data-var last-update-block uint u0)
+(define-data-var audit-entry-counter uint u0)
+
+(define-map audit-trail 
+  uint 
+  {
+    caller: principal,
+    function-name: (string-ascii 50),
+    parameters: (string-ascii 200),
+    success: bool,
+    block-height: uint,
+    vulnerability-type: (string-ascii 30)
+  })
+
+(define-map vulnerability-stats (string-ascii 30) uint)
+(define-map caller-activity principal uint)
+
+(define-private (log-vulnerability-attempt (function-name (string-ascii 50)) (parameters (string-ascii 200)) (success bool) (vuln-type (string-ascii 30)))
+  (let 
+    (
+      (entry-id (var-get audit-entry-counter))
+      (current-stats (default-to u0 (map-get? vulnerability-stats vuln-type)))
+      (caller-count (default-to u0 (map-get? caller-activity tx-sender)))
+    )
+    (map-set audit-trail entry-id {
+      caller: tx-sender,
+      function-name: function-name,
+      parameters: parameters,
+      success: success,
+      block-height: u1,
+      vulnerability-type: vuln-type
+    })
+    (map-set vulnerability-stats vuln-type (+ current-stats u1))
+    (map-set caller-activity tx-sender (+ caller-count u1))
+    (var-set audit-entry-counter (+ entry-id u1))
+    (ok entry-id)
+  )
+)
 
 (define-public (vulnerable-deposit (amount uint))
   (let 
     (
       (current-balance (default-to u0 (map-get? user-balances tx-sender)))
+      (result (if (> amount u0)
+        (begin
+          (map-set user-balances tx-sender (+ current-balance amount))
+          (var-set total-supply (+ (var-get total-supply) amount))
+          (ok amount)
+        )
+        ERR_INVALID_AMOUNT
+      ))
     )
-    (if (> amount u0)
-      (begin
-        (map-set user-balances tx-sender (+ current-balance amount))
-        (var-set total-supply (+ (var-get total-supply) amount))
-        (ok amount)
-      )
-      ERR_INVALID_AMOUNT
-    )
+    (unwrap-panic (log-vulnerability-attempt "vulnerable-deposit" "amount" (is-ok result) "validation"))
+    result
   )
 )
 
 (define-public (overflow-vulnerable-add (a uint) (b uint))
-  (ok (+ a b))
+  (let 
+    (
+      (result (ok (+ a b)))
+    )
+    (unwrap-panic (log-vulnerability-attempt "overflow-vulnerable-add" "a,b" (is-ok result) "arithmetic"))
+    result
+  )
 )
 
 (define-public (underflow-vulnerable-sub (a uint) (b uint))
-  (ok (- a b))
+  (let 
+    (
+      (result (ok (- a b)))
+    )
+    (unwrap-panic (log-vulnerability-attempt "underflow-vulnerable-sub" "a,b" (is-ok result) "arithmetic"))
+    result
+  )
 )
 
 (define-public (division-by-zero-vulnerable (a uint) (b uint))
-  (ok (/ a b))
+  (let 
+    (
+      (result (ok (/ a b)))
+    )
+    (unwrap-panic (log-vulnerability-attempt "division-by-zero-vulnerable" "a,b" (is-ok result) "arithmetic"))
+    result
+  )
 )
 
 (define-public (reentrancy-vulnerable-withdraw (amount uint))
@@ -80,9 +137,15 @@
 )
 
 (define-public (access-control-vulnerable-admin-function (new-owner principal))
-  (begin
-    (var-set contract-owner new-owner)
-    (ok true)
+  (let 
+    (
+      (result (begin
+        (var-set contract-owner new-owner)
+        (ok true)
+      ))
+    )
+    (unwrap-panic (log-vulnerability-attempt "access-control-vulnerable-admin-function" "new-owner" (is-ok result) "access-control"))
+    result
   )
 )
 
@@ -120,9 +183,15 @@
 )
 
 (define-public (state-manipulation-attack (target-user principal) (new-balance uint))
-  (begin
-    (map-set user-balances target-user new-balance)
-    (ok true)
+  (let 
+    (
+      (result (begin
+        (map-set user-balances target-user new-balance)
+        (ok true)
+      ))
+    )
+    (unwrap-panic (log-vulnerability-attempt "state-manipulation-attack" "target-user,new-balance" (is-ok result) "state-manipulation"))
+    result
   )
 )
 
@@ -266,5 +335,31 @@
     reentrancy-guard: (var-get reentrancy-guard),
     last-update: (var-get last-update-block),
     next-withdrawal-id: (var-get next-withdrawal-id)
+  }
+)
+
+(define-read-only (get-audit-entry (entry-id uint))
+  (map-get? audit-trail entry-id)
+)
+
+(define-read-only (get-vulnerability-stats (vuln-type (string-ascii 30)))
+  (default-to u0 (map-get? vulnerability-stats vuln-type))
+)
+
+(define-read-only (get-caller-activity (caller principal))
+  (default-to u0 (map-get? caller-activity caller))
+)
+
+(define-read-only (get-total-audit-entries)
+  (var-get audit-entry-counter)
+)
+
+(define-read-only (get-audit-summary)
+  {
+    total-entries: (var-get audit-entry-counter),
+    arithmetic-attacks: (default-to u0 (map-get? vulnerability-stats "arithmetic")),
+    access-control-attacks: (default-to u0 (map-get? vulnerability-stats "access-control")),
+    state-manipulation-attacks: (default-to u0 (map-get? vulnerability-stats "state-manipulation")),
+    validation-attacks: (default-to u0 (map-get? vulnerability-stats "validation"))
   }
 )
