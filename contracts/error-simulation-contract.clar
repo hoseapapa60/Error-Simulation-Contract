@@ -35,6 +35,8 @@
 (define-data-var emergency-mode bool false)
 (define-data-var last-update-block uint u0)
 (define-data-var audit-entry-counter uint u0)
+(define-data-var challenge-counter uint u0)
+(define-data-var total-points-awarded uint u0)
 
 (define-map audit-trail 
   uint 
@@ -49,6 +51,31 @@
 
 (define-map vulnerability-stats (string-ascii 30) uint)
 (define-map caller-activity principal uint)
+
+(define-map security-challenges
+  uint
+  {
+    title: (string-ascii 100),
+    description: (string-ascii 300),
+    target-function: (string-ascii 50),
+    difficulty: uint,
+    points-reward: uint,
+    active: bool,
+    creator: principal
+  })
+
+(define-map user-progress
+  {user: principal, challenge-id: uint}
+  {
+    completed: bool,
+    attempts: uint,
+    best-score: uint,
+    completion-time: uint
+  })
+
+(define-map user-scores principal uint)
+(define-map challenge-completions uint uint)
+(define-map user-achievements principal (list 10 uint))
 
 (define-private (log-vulnerability-attempt (function-name (string-ascii 50)) (parameters (string-ascii 200)) (success bool) (vuln-type (string-ascii 30)))
   (let 
@@ -69,6 +96,82 @@
     (map-set caller-activity tx-sender (+ caller-count u1))
     (var-set audit-entry-counter (+ entry-id u1))
     (ok entry-id)
+  )
+)
+
+(define-public (create-security-challenge 
+  (title (string-ascii 100)) 
+  (description (string-ascii 300)) 
+  (target-function (string-ascii 50)) 
+  (difficulty uint) 
+  (points-reward uint))
+  (let 
+    (
+      (challenge-id (var-get challenge-counter))
+    )
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR_UNAUTHORIZED)
+    (asserts! (and (> difficulty u0) (<= difficulty u5)) ERR_INVALID_AMOUNT)
+    (asserts! (and (> points-reward u0) (<= points-reward u1000)) ERR_INVALID_AMOUNT)
+    
+    (map-set security-challenges challenge-id {
+      title: title,
+      description: description,
+      target-function: target-function,
+      difficulty: difficulty,
+      points-reward: points-reward,
+      active: true,
+      creator: tx-sender
+    })
+    (map-set challenge-completions challenge-id u0)
+    (var-set challenge-counter (+ challenge-id u1))
+    (ok challenge-id)
+  )
+)
+
+(define-public (attempt-challenge (challenge-id uint) (target-function-name (string-ascii 50)))
+  (let 
+    (
+      (challenge (unwrap! (map-get? security-challenges challenge-id) ERR_NOT_FOUND))
+      (progress-key {user: tx-sender, challenge-id: challenge-id})
+      (current-progress (default-to {completed: false, attempts: u0, best-score: u0, completion-time: u0} 
+                                   (map-get? user-progress progress-key)))
+      (new-attempts (+ (get attempts current-progress) u1))
+    )
+    (asserts! (get active challenge) ERR_PAUSED)
+    (asserts! (not (get completed current-progress)) ERR_ALREADY_EXISTS)
+    (asserts! (is-eq (get target-function challenge) target-function-name) ERR_INVALID_AMOUNT)
+    
+    (map-set user-progress progress-key {
+      completed: true,
+      attempts: new-attempts,
+      best-score: (get points-reward challenge),
+      completion-time: u1
+    })
+    
+    (map-set user-scores tx-sender 
+      (+ (default-to u0 (map-get? user-scores tx-sender)) (get points-reward challenge)))
+    
+    (map-set challenge-completions challenge-id 
+      (+ (default-to u0 (map-get? challenge-completions challenge-id)) u1))
+    
+    (var-set total-points-awarded 
+      (+ (var-get total-points-awarded) (get points-reward challenge)))
+    
+    (ok (get points-reward challenge))
+  )
+)
+
+(define-public (deactivate-challenge (challenge-id uint))
+  (let 
+    (
+      (challenge (unwrap! (map-get? security-challenges challenge-id) ERR_NOT_FOUND))
+    )
+    (asserts! (or (is-eq tx-sender (var-get contract-owner)) 
+                  (is-eq tx-sender (get creator challenge))) ERR_UNAUTHORIZED)
+    
+    (map-set security-challenges challenge-id 
+      (merge challenge {active: false}))
+    (ok true)
   )
 )
 
@@ -362,4 +465,43 @@
     state-manipulation-attacks: (default-to u0 (map-get? vulnerability-stats "state-manipulation")),
     validation-attacks: (default-to u0 (map-get? vulnerability-stats "validation"))
   }
+)
+
+(define-read-only (get-challenge (challenge-id uint))
+  (map-get? security-challenges challenge-id)
+)
+
+(define-read-only (get-user-score (user principal))
+  (default-to u0 (map-get? user-scores user))
+)
+
+(define-read-only (get-user-progress (user principal) (challenge-id uint))
+  (map-get? user-progress {user: user, challenge-id: challenge-id})
+)
+
+(define-read-only (get-challenge-stats (challenge-id uint))
+  (default-to u0 (map-get? challenge-completions challenge-id))
+)
+
+(define-read-only (get-total-challenges)
+  (var-get challenge-counter)
+)
+
+(define-read-only (get-challenge-leaderboard)
+  {
+    total-challenges: (var-get challenge-counter),
+    total-points-awarded: (var-get total-points-awarded),
+    active-challenges: u0
+  }
+)
+
+(define-read-only (get-user-achievements (user principal))
+  (default-to (list) (map-get? user-achievements user))
+)
+
+(define-read-only (is-challenge-completed (user principal) (challenge-id uint))
+  (match (map-get? user-progress {user: user, challenge-id: challenge-id})
+    progress (get completed progress)
+    false
+  )
 )
