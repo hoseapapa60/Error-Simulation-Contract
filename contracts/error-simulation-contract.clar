@@ -9,6 +9,8 @@
 (define-constant ERR_REENTRANCY (err u108))
 (define-constant ERR_PAUSED (err u109))
 (define-constant ERR_EXPIRED (err u110))
+(define-constant ERR_SNAPSHOT_LIMIT (err u200))
+(define-constant ERR_SNAPSHOT_NOT_FOUND (err u201))
 
 (define-data-var contract-owner principal tx-sender)
 (define-data-var total-supply uint u1000000)
@@ -37,6 +39,7 @@
 (define-data-var audit-entry-counter uint u0)
 (define-data-var challenge-counter uint u0)
 (define-data-var total-points-awarded uint u0)
+(define-data-var max-snapshots-per-user uint u10)
 
 (define-map audit-trail 
   uint 
@@ -77,6 +80,19 @@
 (define-map challenge-completions uint uint)
 (define-map user-achievements principal (list 10 uint))
 
+(define-map user-snapshot-count principal uint)
+(define-map user-snapshot-next-id principal uint)
+(define-map user-snapshots
+  {user: principal, id: uint}
+  {
+    balance: uint,
+    deposits: uint,
+    access-level: uint,
+    vuln-store: uint,
+    timestamp: uint,
+    note: (string-ascii 60)
+  })
+
 (define-private (log-vulnerability-attempt (function-name (string-ascii 50)) (parameters (string-ascii 200)) (success bool) (vuln-type (string-ascii 30)))
   (let 
     (
@@ -96,6 +112,58 @@
     (map-set caller-activity tx-sender (+ caller-count u1))
     (var-set audit-entry-counter (+ entry-id u1))
     (ok entry-id)
+  )
+)
+
+(define-public (create-snapshot (note (string-ascii 60)))
+  (let 
+    (
+      (snapshot-count (default-to u0 (map-get? user-snapshot-count tx-sender)))
+      (snapshot-id (default-to u1 (map-get? user-snapshot-next-id tx-sender)))
+      (current-balance (default-to u0 (map-get? user-balances tx-sender)))
+      (current-deposits (default-to u0 (map-get? user-deposits tx-sender)))
+      (current-access (default-to u0 (map-get? access-levels tx-sender)))
+      (current-vuln-store (default-to u0 (map-get? vulnerable-storage tx-sender)))
+    )
+    (asserts! (< snapshot-count (var-get max-snapshots-per-user)) ERR_SNAPSHOT_LIMIT)
+    
+    (map-set user-snapshots {user: tx-sender, id: snapshot-id} {
+      balance: current-balance,
+      deposits: current-deposits,
+      access-level: current-access,
+      vuln-store: current-vuln-store,
+      timestamp: u1,
+      note: note
+    })
+    
+    (map-set user-snapshot-count tx-sender (+ snapshot-count u1))
+    (map-set user-snapshot-next-id tx-sender (+ snapshot-id u1))
+    (ok snapshot-id)
+  )
+)
+
+(define-public (restore-snapshot (snapshot-id uint))
+  (let 
+    (
+      (snapshot (unwrap! (map-get? user-snapshots {user: tx-sender, id: snapshot-id}) ERR_SNAPSHOT_NOT_FOUND))
+    )
+    (map-set user-balances tx-sender (get balance snapshot))
+    (map-set user-deposits tx-sender (get deposits snapshot))
+    (map-set access-levels tx-sender (get access-level snapshot))
+    (map-set vulnerable-storage tx-sender (get vuln-store snapshot))
+    (ok true)
+  )
+)
+
+(define-public (delete-snapshot (snapshot-id uint))
+  (let 
+    (
+      (snapshot (unwrap! (map-get? user-snapshots {user: tx-sender, id: snapshot-id}) ERR_SNAPSHOT_NOT_FOUND))
+      (snapshot-count (default-to u0 (map-get? user-snapshot-count tx-sender)))
+    )
+    (map-delete user-snapshots {user: tx-sender, id: snapshot-id})
+    (map-set user-snapshot-count tx-sender (if (> snapshot-count u0) (- snapshot-count u1) u0))
+    (ok true)
   )
 )
 
@@ -504,4 +572,24 @@
     progress (get completed progress)
     false
   )
+)
+
+(define-read-only (get-snapshot (user principal) (snapshot-id uint))
+  (map-get? user-snapshots {user: user, id: snapshot-id})
+)
+
+(define-read-only (get-user-snapshot-count (user principal))
+  (default-to u0 (map-get? user-snapshot-count user))
+)
+
+(define-read-only (get-max-snapshots)
+  (var-get max-snapshots-per-user)
+)
+
+(define-read-only (list-user-snapshots (user principal))
+  {
+    total-snapshots: (default-to u0 (map-get? user-snapshot-count user)),
+    next-id: (default-to u1 (map-get? user-snapshot-next-id user)),
+    max-allowed: (var-get max-snapshots-per-user)
+  }
 )
