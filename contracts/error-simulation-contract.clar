@@ -593,11 +593,3 @@
     max-allowed: (var-get max-snapshots-per-user)
   }
 )
-
-(define-read-only (list-user-snapshots (user principal))
-  {
-    total-snapshots: (default-to u0 (map-get? user-snapshot-count user)),
-    next-id: (default-to u1 (map-get? user-snapshot-next-id user)),
-    max-allowed: (var-get max-snapshots-per-user)
-  }
-)
