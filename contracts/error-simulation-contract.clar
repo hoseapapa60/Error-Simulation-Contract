@@ -21,7 +21,7 @@
 
 (define-map user-balances principal uint)
 (define-map user-deposits principal uint)
-(define-map approved-operators principal bool)
+(define-map approved-operators {owner: principal, operator: principal} bool)
 (define-map withdrawal-requests 
   uint 
   {
@@ -592,4 +592,56 @@
     next-id: (default-to u1 (map-get? user-snapshot-next-id user)),
     max-allowed: (var-get max-snapshots-per-user)
   }
+)
+
+(define-public (approve-operator (operator principal))
+  (begin
+    (map-set approved-operators {owner: tx-sender, operator: operator} true)
+    (ok true)
+  )
+)
+
+(define-public (revoke-operator (operator principal))
+  (begin
+    (map-set approved-operators {owner: tx-sender, operator: operator} false)
+    (ok true)
+  )
+)
+
+(define-read-only (is-operator-approved (owner principal) (operator principal))
+  (default-to false (map-get? approved-operators {owner: owner, operator: operator}))
+)
+
+(define-public (operator-deposit (owner principal) (amount uint))
+  (let 
+    (
+      (is-approved (default-to false (map-get? approved-operators {owner: owner, operator: tx-sender})))
+      (current-balance (default-to u0 (map-get? user-balances owner)))
+    )
+    (asserts! is-approved ERR_UNAUTHORIZED)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (map-set user-balances owner (+ current-balance amount))
+    (var-set total-supply (+ (var-get total-supply) amount))
+    (ok amount)
+  )
+)
+
+(define-public (operator-withdraw (owner principal) (amount uint))
+  (let 
+    (
+      (is-approved (default-to false (map-get? approved-operators {owner: owner, operator: tx-sender})))
+      (user-balance (default-to u0 (map-get? user-balances owner)))
+    )
+    (asserts! is-approved ERR_UNAUTHORIZED)
+    (asserts! (not (var-get contract-paused)) ERR_PAUSED)
+    (asserts! (not (var-get reentrancy-guard)) ERR_REENTRANCY)
+    (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+    (asserts! (<= amount (var-get max-withdrawal)) ERR_INVALID_AMOUNT)
+    (asserts! (>= user-balance amount) ERR_INSUFFICIENT_FUNDS)
+    (var-set reentrancy-guard true)
+    (map-set user-balances owner (- user-balance amount))
+    (try! (stx-transfer? amount (as-contract tx-sender) owner))
+    (var-set reentrancy-guard false)
+    (ok amount)
+  )
 )
